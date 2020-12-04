@@ -4,50 +4,48 @@
 
 // length here means number of entries; offset here means entry id, used to access individual entries from the data segment.
 // queue: length(11) offset(11) pad(1) valid(1) = 3B
-// entry: valid(1) value(8) = 2B // entries are interleaved with each other; entry idx HUGE for access
+// entry: base(1) valid(1) value(8) = 2B
 // monitor: ACTIVE_QUERIES(8) | queues... = 1B + 64(3B) = 193B
 
 #define MAX_MEMORY                  2048
-#define MONITOR_SEG_LEN             194 // added one extra for padding so that 194B
-#define DATA_SEG_LEN                1854 // max - monitor
-#define MAX_ENTRIES                 1684 // data_seg_len * 8 / 9
+#define MONITOR_SEG_LEN             193
+#define DATA_SEG_LEN                1855 // max - monitor
+#define MAX_ENTRIES                 1484 // data_seg_len * 8 / 9
 
-// Queue related
-// q is of type queue_t *, v is of type unsigned char
-// queues are indexed in sequential fashion, are 3 bytes apart, starting from idx 1 of data
-#define MAX_ACTIVE_QUEUES           64
-#define QUEUE_MASK                  0x7FF
-#define QUEUE_LEN                   3
-#define ACTIVE_QUEUES               data[0]
-#define GET_QUEUE_LENGTH(q)         (((*q) >> 13) & QUEUE_MASK)
-#define GET_QUEUE_OFFSET(q)         (((*q) >> 2) & QUEUE_MASK)
-#define QUEUE_ADJ_MASK_OFFSET(q)    ( (*q) & ( ~((QUEUE_MASK << 13) >> 11 ) ))
-#define QUEUE_ADJ_MASK_LENGTH(q)    ( (*q) & ( ~(QUEUE_MASK << 13) ))
-#define SET_QUEUE_OFFSET(q,v)       ((*q) = ( ( QUEUE_ADJ_MASK_OFFSET((q))) | ((v) << 2) ))
-#define SET_QUEUE_LENGTH(q,v)       ((*q) = ( ( QUEUE_ADJ_MASK_LENGTH((q))) | ((v) << 13) ))
-#define IS_QUEUE_VALID(q)           ((*q) & 0x1)
-#define SET_QUEUE_VALID(q)          ((*q) |= 0x1)
-#define SET_QUEUE_INVALID(q)        ((*q) &= (~0 << 1))
+// Queue
+#define MAX_QUEUES                   64
+#define NUM_ACTIVE_QUEUES           data[0]
+#define SET_QUEUE_LENGTH(q, n)      ( (q) = ( (q) & (~(0x7FF << 13)) ) | ((n) << 13) )
+#define GET_QUEUE_LENGTH(q)         ( ((q) >> 13) & (0x7FF) )
+#define SET_QUEUE_BASE(q, n)        ( (q) = ( (q) & (~(0x7FF << 13)) ) | ((n) << 2) )
+#define GET_QUEUE_BASE(q)           ( ((q) >> 2) & (0x7FF) )
+#define SET_QUEUE_VALID(q)          ( (q) |= 0x1 )
+#define SET_QUEUE_INVALID(q)        ( (q) = (q) & (~(0 << 1)) )
+#define IS_QUEUE_VALID(q)           ( (q) & 0x1 )
+#define GET_QUEUE(i)                ( (queue_t*)&data[(3 * (i)) + 1] )
 
-// Entry related (needs updating)
-#define ENTRY_LEN_BIT               9
-#define ENTRY_MASK                  0x1FF
-#define GET_ENTRY_SHIFT(i)          (7 - ((i) % 8))
-#define GET_ENTRY_BLOCK(i)          ((entry_block_t *)&data[(9*(i)/8) + MONITOR_SEG_LEN])
-#define GET_ENTRY_FROM_BLOCK(b,i)   ((entry_t)(((*b) >> GET_ENTRY_SHIFT((i))) & ENTRY_MASK))
-#define ENTRY_ADJUSTMENT_MASK(b,i)  ((*b) & ( ~((ENTRY_MASK << (32 - GET_ENTRY_SHIFT((i)))) >> ( ) )
-//#define ENTRY_ADJUSTMENT_MASK(b,i)  ((*b) & ( ~((ENTRY_MASK << GET_ENTRY_SHIFT((i)))) ) )
-#define SET_BLOCK_ENTRY(b,i,e)      ((*b) = ( (ENTRY_ADJUSTMENT_MASK(b,i)) | ((e) << ENTRY_LEN_BIT)))
+// Entry (Block)
+#define GET_ENTRY_BLOCK(i)          ( (entry_block_t *)&data[(10*((i)+1)/8) + MONITOR_SEG_LEN] )
+#define RSHIFT_ENTRY(i)             ( 6 - ((i) % 8) )
+#define LSHIFT_ENTRY(i)             ( (i) % 8 )
+#define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (*b) >> RSHIFT_ENTRY((i)) ) & 0x1FF ))
+#define WRITE_ENTRY_TO_BLOCK(b,e,i) ( ( (*b) & ( ~(0x1FF << 6) >> LSHIFT_ENTRY((i)) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
+#define READ_ENTRY(i)               ( (entry_t)(( (*(GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & 0x1FF ))
+#define WRITE_ENTRY(e,i)            ( ( (*(GET_ENTRY_BLOCK((i)))) & ( ~(0x1FF << 6) >> LSHIFT_ENTRY((i)) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
 
-// TODO: Fix set block entry
-    
-// All of below assume e is an entry_t that contains *only* the contents relevant to itself/its 9 bits
-#define IS_ENTRY_VALID(e)           (((e) >> 8) & 0x1)
-#define SET_ENTRY_VALID(e)          ((e) |= (0x1 << 8))
-#define SET_ENTRY_INVALID(e)        ((e) &= (~(0x1 << 8)))
-#define GET_ENTRY_VALUE(e)          (((e) & 0x00FF))
-#define SET_ENTRY_VALUE(e,v)        ((e) |= ((v) & 0x00FF))
+// Entry ("isolated")
+#define INVALID_ENTRY               MAX_ENTRIES
+#define SET_ENTRY_VALID(e)          ( (e) |= (1 << 8) )
+#define SET_ENTRY_INVALID(e)        ( (e) &= (1 << 8) )
+#define IS_ENTRY_VALID(e)           ( ((e) >> 8) & (0x1) )
+#define SET_ENTRY_VALUE(e,n)        ( (e) = ((e) & (~0xFF)) | (n) )
+#define GET_ENTRY_VALUE(e)          ( (uint8_t)(( (e) & (0x00FF) ) ))
+#define IS_ENTRY_QUEUE_BASE(e)     ( ((e) >> 9) & (0x1) )
+#define SET_ENTRY_QUEUE_BASE_ON(e) ( (e) |= (1 << 9) )
+#define SET_ENTRY_QUEUE_BASE_OFF(e) ( (e) &= (~(1 << 9)) )
 
+// Misc
+#define ADD_TO_QUEUE(q, l, e, i, b)  SET_ENTRY_VALID(e); SET_ENTRY_VALUE(e, b); WRITE_ENTRY(e, i); SET_QUEUE_LENGTH(q, l + 1);
 
 unsigned char data[MAX_MEMORY] = {0};
 enum { FALSE = 0, TRUE = 1};
@@ -65,180 +63,203 @@ void on_illegal_operation() {
 
 typedef uint32_t queue_t;
 typedef uint16_t entry_t;
-typedef uint32_t entry_block_t; // entry block should be wider than an entry for good shift
+typedef uint16_t entry_block_t;
 
 queue_t * create_queue() {
-    for(uint16_t i=0; i < MAX_ACTIVE_QUEUES; i++) {
-        queue_t * q = (queue_t *)&data[(QUEUE_LEN * i) + 1];
-        if(!IS_QUEUE_VALID(q)) {
-            // Free queue space - use this
-            for (uint16_t j = 0; j < MAX_ENTRIES; j++) {
-                entry_block_t * b = GET_ENTRY_BLOCK(j);
-                entry_t e = GET_ENTRY_FROM_BLOCK(b, j);
-        
-                if (!IS_ENTRY_VALID(e)) {
-                    // e can be the first entry to queue
-                    // note: do not reserve the entry for the queue here
-                    // only upon enqueue first value should the space be used, and offset adjusted if necessary
-                    SET_QUEUE_LENGTH(q, 0);
-                    SET_QUEUE_OFFSET(q, j);
-                    SET_QUEUE_VALID(q);
-                    return q;
+    for (uint16_t qid; qid < MAX_QUEUES; qid++) {
+        queue_t* q = GET_QUEUE(qid);
+        if (!IS_QUEUE_VALID(*q)) {
+            SET_QUEUE_VALID(*q);
+            // find the next available base to mark it for this queue
+            uint8_t foundBase = FALSE;
+            for (uint16_t eid = 0; eid < MAX_ENTRIES; eid++) {
+                if (!IS_ENTRY_VALID(READ_ENTRY(eid))) {
+                    SET_QUEUE_BASE(*q, eid);
+                    foundBase = TRUE;
+                    // don't mark entry with queue base yet - the base may change on enqueue (if this turns busy by then)
+                    // don't want to report something as a base until it's properly allocated as one
+                    break;
                 }
             }
-            // there was no available space on entry segment, despite being queues available - out of mem
-            on_out_of_memory();
+            // we *may* get to here without an assigned base - if so, that doesn't necessarily mean we're out of memory
+            // everything may be busy now but by the time the first entry is enqueued to this queue, there may be spaces available
+            // so, don't fail for out of memory: rather, just mark the base to be invalid - at the time of enqueue, will handle finding space
+            if (!foundBase) {
+                SET_QUEUE_BASE(*q, INVALID_ENTRY);
+            }
+
+            return q;
         }
     }
-    // no queue is available -> treat as illegal op
+    // all are taken -> interpret as illegal op
     on_illegal_operation();
 }
 
 void destroy_queue(queue_t * q) {
-
-    // ensure valid queue
-    if (!IS_QUEUE_VALID(q))
+    if (q == NULL || !IS_QUEUE_VALID(*q)) // invalid queue
         on_illegal_operation();
+    
+    uint16_t base = GET_QUEUE_BASE(*q);
+    uint16_t len = GET_QUEUE_LENGTH(*q);
 
-    uint16_t base = GET_QUEUE_OFFSET(q);
-    uint16_t len = GET_QUEUE_LENGTH(q);
-
-    // invalidate all of queue's entries
-    for(uint16_t i=base; i < len; i++) {
-        entry_block_t* b = GET_ENTRY_BLOCK(i);
-        entry_t e = GET_ENTRY_FROM_BLOCK(b, i);
+    // invalidate all entries in queue
+    for (uint16_t eid = base; eid < base + len; eid++) {
+        entry_t e = READ_ENTRY(eid);
         SET_ENTRY_INVALID(e);
-        SET_BLOCK_ENTRY(b, i, e);
+        WRITE_ENTRY(e, eid);
     }
-
-    // "free/clean up" the header
-    SET_QUEUE_OFFSET(q, 0);
-    SET_QUEUE_LENGTH(q, 0);
+    
+    // clean up queue
+    SET_QUEUE_BASE(*q, INVALID_ENTRY);
+    SET_QUEUE_LENGTH(*q, 0);
+    SET_QUEUE_INVALID(*q);
+    q = NULL;
 }
 
 void enqueue_byte(queue_t * q, unsigned char b) {
-
-    // ensure valid queue
-    if (!IS_QUEUE_VALID(q))
+    if (q == NULL || !IS_QUEUE_VALID(*q)) // invalid queue
         on_illegal_operation();
 
-    uint16_t base = GET_QUEUE_OFFSET(q);
-    uint16_t len = GET_QUEUE_LENGTH(q);
-
+    uint16_t base = GET_QUEUE_BASE(*q);
+    uint16_t len = GET_QUEUE_LENGTH(*q);
+    uint16_t end = base + len;
     uint8_t isDone = FALSE;
-    uint16_t curr_idx = (len == 0) ? base : base + len - 1;
 
-    //try to look right initially
-    for (uint16_t i = curr_idx; i < MAX_ENTRIES; i++) {
-        entry_block_t* block = GET_ENTRY_BLOCK(i);
-        entry_t e = GET_ENTRY_FROM_BLOCK(block, i); // e here on second time doesn't report invalid - WRONG
-
+    // try to look right for a spot
+    for (uint16_t eid = base; eid < MAX_ENTRIES; eid++) {
+        entry_t e = READ_ENTRY(eid);
         if (!IS_ENTRY_VALID(e)) {
-            if (i - curr_idx >= 1) {
-                if (len == 0) {
-                    // base offset is outdated, need to update it
-                    SET_ENTRY_VALID(e);
-                    SET_ENTRY_VALUE(e, b);
-                    SET_BLOCK_ENTRY(block, i, e);
-                    SET_QUEUE_OFFSET(q, i);
-                    SET_QUEUE_LENGTH(q, len + 1);
-                }
-                else {
-                    if (i - curr_idx > 1) {
-                        // more than one separation, needs shift
-                        for (uint16_t j = i; j < curr_idx; j++) { // TODO: can use while i > curr_idx here also
-                            block = GET_ENTRY_BLOCK(j-1);
-                            e = GET_ENTRY_FROM_BLOCK(GET_ENTRY_BLOCK(j), j);
-                            SET_BLOCK_ENTRY(block, j-1, e);
-                        }
-                    }
-                    block = GET_ENTRY_BLOCK(curr_idx + 1);
-                    e = GET_ENTRY_FROM_BLOCK(block, curr_idx + 1);
-                    //add: validate, set value, update q len
-                    SET_ENTRY_VALID(e);
-                    SET_ENTRY_VALUE(e, b);
-                    SET_BLOCK_ENTRY(block, curr_idx + 1, e);
-                    SET_QUEUE_LENGTH(q, len + 1);
-                }
+            uint16_t gap = eid - end;
+            
+            if (gap == 0) {
+                // base matches, add to eid (e)
+                // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
+                SET_ENTRY_QUEUE_BASE_ON(e);
+                ADD_TO_QUEUE(*q, len, e, eid, b);
             }
-            else if (i - curr_idx == 0) {
-                // directly on base, applies for empty queues that are not outdated, instert to i's entry
-                // add: validate, set value, update q len
-                SET_ENTRY_VALID(e);
-                SET_ENTRY_VALUE(e, b);
-                SET_BLOCK_ENTRY(block, curr_idx + 1, e);
-                SET_QUEUE_LENGTH(q, len + 1);
+            else if(len == 0) {
+                // base differs, but empty - update it and add to eid (e)
+                // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
+                SET_QUEUE_BASE(*q, eid);
+                SET_ENTRY_QUEUE_BASE_ON(e);
+                ADD_TO_QUEUE(*q, len, e, eid, b);
+            }
+            else {
+                if (gap > 1) {
+                    // shift right is necessary
+                    uint8_t previousAdjustment = FALSE;
+                    for (uint16_t j = end + 1; j < eid; j++) {
+                        entry_t ej = READ_ENTRY(j);
+                        if (IS_ENTRY_QUEUE_BASE(ej)) {
+                            // find the queue that this entry is a front of, and update it to the right
+                            for (uint64_t qid = 0; qid < NUM_ACTIVE_QUEUES; qid++) {
+                                queue_t * qt = GET_QUEUE(qid);
+                                if (GET_QUEUE_BASE(*qt) == j) {
+                                    SET_QUEUE_BASE(*qt, j + 1);
+                                    entry_t new_base = READ_ENTRY(j + 1);
+                                    SET_ENTRY_QUEUE_BASE_ON(new_base);
+                                    SET_ENTRY_QUEUE_BASE_OFF(ej);
+                                }
+                            }
+                        }
+                        WRITE_ENTRY(ej, j + 1);
+                    }
+                }
+                // have shifted if necessary; now end+1 is available - add to it
+                e = READ_ENTRY(end + 1);
+                ADD_TO_QUEUE(*q, len, e, end+1, b);
             }
             isDone = TRUE;
             break;
         }
     }
-    if (!isDone) {
-        // try to look left now, all space right is occupied
-        for (int i = curr_idx; i > 0; i--) {
-            entry_block_t* block = GET_ENTRY_BLOCK(i);
-            entry_t e = GET_ENTRY_FROM_BLOCK(block, i);
 
+    if (!isDone) {
+        // didn't find to the right, try left
+        for (int16_t i = base; i > 0; i--) {
+            uint16_t eid = (uint16_t)i; // we're not using nowhere close near to the range of int, so no problem
+            entry_t e = READ_ENTRY(eid);
             if (!IS_ENTRY_VALID(e)) {
-                if (curr_idx - i >= 1) {
+                uint16_t gap = base - i;
+
+                if (gap != 0) {
                     if (len == 0) {
-                        // base offset is outdated, need to update it
-                        SET_ENTRY_VALID(e);
-                        SET_ENTRY_VALUE(e, b);
-                        SET_BLOCK_ENTRY(block, i, e);
-                        SET_QUEUE_OFFSET(q, i);
-                        SET_QUEUE_LENGTH(q, len + 1);
+                        // update base to eid, add to eid (e)
+                        // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
+                        SET_QUEUE_BASE(*q, eid);
+                        SET_ENTRY_QUEUE_BASE_ON(e);
+                        ADD_TO_QUEUE(*q, len, e, eid, b);
                     }
                     else {
-                        if (curr_idx - i > 1) {
-                            // more than one separation, needs shift
-                            for (int j = i; j > curr_idx; j++) { // TODO: can use while i > curr_idx here also
-                                block = GET_ENTRY_BLOCK(j);
-                                e = GET_ENTRY_FROM_BLOCK(GET_ENTRY_BLOCK(j - 1), j - 1);
-                                SET_BLOCK_ENTRY(block, j, e);
+                        // shift works no matter what - for gap == 1 it just does one iter
+                        for (uint16_t j = eid; j < end; j++) {
+                            entry_t ej = READ_ENTRY(j + 1);
+                            if (IS_ENTRY_QUEUE_BASE(ej)) {
+                                // find the queue that the next entry is a front of, and update it to the left
+                                for (uint64_t qid = 0; qid < NUM_ACTIVE_QUEUES; qid++) {
+                                    queue_t * qt = GET_QUEUE(qid);
+                                    if (GET_QUEUE_BASE(*qt) == j) {
+                                        SET_QUEUE_BASE(*qt, j);
+                                        entry_t new_base = READ_ENTRY(j);
+                                        SET_ENTRY_QUEUE_BASE_ON(new_base);
+                                        SET_ENTRY_QUEUE_BASE_OFF(ej);
+                                    }
+                                }
                             }
+                            WRITE_ENTRY(ej, j);
                         }
-                        block = GET_ENTRY_BLOCK(curr_idx + 1);
-                        e = GET_ENTRY_FROM_BLOCK(block, curr_idx + 1);
-                        //add: validate, set value, update q len
-                        SET_ENTRY_VALID(e);
-                        SET_ENTRY_VALUE(e, b);
-                        SET_BLOCK_ENTRY(block, curr_idx + 1, e);
-                        SET_QUEUE_LENGTH(q, len + 1);
+                        // update base to base - 1, add to end
+                        // entry base on flag is adjusted above on first iter
+                        SET_QUEUE_BASE(*q, len - 1);
+                        e = READ_ENTRY(end);
+                        ADD_TO_QUEUE(*q, len, e, eid, b);
                     }
                 }
-                // curr_idx - i == 0 already addressed when going right
+                // gap == 0 covered when looking to the right
+                // TODO: gap == 0 seems to be called when a queue without space is created - what to do? Set base to 0, try again?
+
                 isDone = TRUE;
                 break;
             }
         }
     }
-    // couldn't find to the right, couldn't find to the left - out of mem
-    if (!isDone)
+
+    if (!isDone) // didn't find right or left = no space -> out of memory
         on_out_of_memory();
 }
 
 unsigned char dequeue_byte(queue_t * q) {
-    uint16_t base = GET_QUEUE_OFFSET(q);
-    uint16_t len = GET_QUEUE_LENGTH(q);
+    if (q == NULL || !IS_QUEUE_VALID(*q)) // invalid queue
+        on_illegal_operation();
 
-    if(len != 0) {
-        // invalidate byte, set new base, and update length
-        entry_block_t* block = GET_ENTRY_BLOCK(base);
-        entry_t e = GET_ENTRY_FROM_BLOCK(block, base);
-        unsigned char value = GET_ENTRY_VALUE(e);
-        SET_ENTRY_INVALID(e);
-        SET_BLOCK_ENTRY(block, base, e);
-        SET_QUEUE_OFFSET(q, base + 1);
-        SET_QUEUE_LENGTH(q, len-1);
-        return value;
+    uint16_t base = GET_QUEUE_BASE(*q);
+    uint16_t len = GET_QUEUE_LENGTH(*q);
+
+    if (len == 0) // empty queue
+        on_illegal_operation();
+
+    entry_t e = READ_ENTRY(base);
+    uint8_t value = GET_ENTRY_VALUE(e);
+    SET_ENTRY_INVALID(e);
+    SET_ENTRY_QUEUE_BASE_OFF(e);
+    WRITE_ENTRY(e, base);
+    if (len > 1) {
+        // if there's more entries that this queue owns to the right, adjust
+        SET_QUEUE_BASE(*q, base + 1);
+        entry_t next = READ_ENTRY(base + 1);
+        SET_ENTRY_QUEUE_BASE_ON(next);
+        WRITE_ENTRY(next, base + 1);
     }
-
-    // empty queue
-    on_illegal_operation();
+    else {
+        // this was the sole entry of the queue
+        SET_QUEUE_BASE(*q, INVALID_ENTRY);
+    }
+    SET_QUEUE_LENGTH(*q, len - 1);
+    return value;
 }
 
 int main(void) {
+    uint8_t t = ~(1 << 3);
     queue_t * a = create_queue();
     printf("a: %u\n", *a);
     enqueue_byte(a, 0);
