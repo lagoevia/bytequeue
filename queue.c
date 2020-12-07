@@ -26,13 +26,30 @@
 
 // Entry (Block)
 #define ENTRY_MASK                  0x3FF
-#define GET_ENTRY_BLOCK(i)          ( (entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
-#define RSHIFT_ENTRY(i)             ( 32 * (((i) / 3) + 1) - 1 - (10*(i)+9) )
-#define LSHIFT_ENTRY(i)             ( ((i) % 3 == 0) ? 0 : (10 * ((i) % 3)) )
-#define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (*b) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
-#define WRITE_ENTRY_TO_BLOCK(b,e,i) ( *((b)) = ( ( (*b) & ( ~(ENTRY_MASK << 16) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) ) )
-#define READ_ENTRY(i)               ( (entry_t)(( (*(GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
-#define WRITE_ENTRY(e,i)            ( *(GET_ENTRY_BLOCK((i))) = ( (*(GET_ENTRY_BLOCK((i)))) & ( ~(ENTRY_MASK << 16) >> LSHIFT_ENTRY((i))) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
+#define GET_ENTRY_BLOCK_PTR(i)          ( (entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
+#define GET_ENTRY_BLOCK(i)          ( *(entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
+inline uint8_t GET_REAL_START_BIT(i) { return (((i) == 0) ? 0 : 8 * (10 * (i) / 8)); }
+inline uint8_t GET_REAL_END_BIT(i) { return (32 + 8 * ((10 * (i)) / 8)); }
+inline uint8_t RSHIFT_ENTRY(i) { return ((GET_REAL_END_BIT(i)) - 10 - (10 * (i))); }
+inline uint8_t LSHIFT_ENTRY(i) { return (10 * (i)-(GET_REAL_START_BIT((i)))); }
+#define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (b) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
+#define WRITE_ENTRY_TO_BLOCK(b,e,i) ( *((b)) = ( ( (*b) & ( ~(ENTRY_MASK << 22) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) ) )
+// read variants should NOT modify the underlying block
+// they should just get the block's value, and use that to shift
+#define READ_ENTRY(i)               ( (entry_t)(( ((GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
+#define WRITE_ENTRY(e,i)            ( *(GET_ENTRY_BLOCK_PTR((i))) = ( ((GET_ENTRY_BLOCK((i)))) & ( ~(ENTRY_MASK << 22) >> LSHIFT_ENTRY((i))) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
+
+
+
+// You'll read a LE number representation of the accurate BE number
+// Get the block, and swap it (to BE)
+// Then, the block will hold its accurate value
+
+
+// You'll have a block, get its value in BE, and modify it accordingly
+// Now you need to write this so that it's in BE in memory
+// So, swap the end result of the assign to LE, so that it writes it ultimately as desired (BE) on disk
+
 
 // Entry ("isolated")
 #define INVALID_ENTRY               MAX_ENTRIES
