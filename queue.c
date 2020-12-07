@@ -7,10 +7,17 @@
 // entry: base(1) valid(1) value(8) = 2B
 // monitor: ACTIVE_QUERIES(8) | queues... = 1B + 64(3B) = 193B
 
+
 #define MAX_MEMORY                  2048
 #define MONITOR_SEG_LEN             193
 #define DATA_SEG_LEN                1855 // max - monitor
 #define MAX_ENTRIES                 1484 // data_seg_len * 8 / 9
+
+#define IS_LITTLE_ENDIAN    (*(unsigned char *)&(uint16_t){1})
+typedef uint32_t queue_t;
+typedef uint16_t entry_t;
+typedef uint32_t entry_block_t;
+unsigned char data[MAX_MEMORY] = { 0 };
 
 // Queue
 #define MAX_QUEUES                   64
@@ -26,35 +33,66 @@
 
 // Entry (Block)
 #define ENTRY_MASK                  0x3FF
-#define GET_ENTRY_BLOCK_PTR(i)          ( (entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
-#define GET_ENTRY_BLOCK(i)          ( *(entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
-inline uint8_t GET_REAL_START_BIT(i) { return (((i) == 0) ? 0 : 8 * (10 * (i) / 8)); }
-inline uint8_t GET_REAL_END_BIT(i) { return (32 + 8 * ((10 * (i)) / 8)); }
-inline uint8_t RSHIFT_ENTRY(i) { return ((GET_REAL_END_BIT(i)) - 10 - (10 * (i))); }
+#define GET_ENTRY_BLOCK_PTR(i)      ( (entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
+#define GET_ENTRY_BLOCK(i)          ( *(entry_block_t *)(&data[(10*((i))/8) + MONITOR_SEG_LEN]) )
+inline uint8_t GET_REAL_START_BIT(i) { return (((i) == 0) ? 0 : 8 * (10 * (i) / 8)) - 1; }
+inline uint8_t GET_REAL_END_BIT(i) { return (31 + 8 * ((10 * (i)) / 8)); }
+inline uint8_t RSHIFT_ENTRY(i) { return ((GET_REAL_END_BIT(i)) - 9 - (10 * (i))); }
 inline uint8_t LSHIFT_ENTRY(i) { return (10 * (i)-(GET_REAL_START_BIT((i)))); }
 #define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (b) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
 #define WRITE_ENTRY_TO_BLOCK(b,e,i) ( *((b)) = ( ( (*b) & ( ~(ENTRY_MASK << 22) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) ) )
 // read variants should NOT modify the underlying block
 // they should just get the block's value, and use that to shift
-#define READ_ENTRY(i)               ( (entry_t)(( ((GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
-#define WRITE_ENTRY(e,i)            ( *(GET_ENTRY_BLOCK_PTR((i))) = ( ((GET_ENTRY_BLOCK((i)))) & ( ~(ENTRY_MASK << 22) >> LSHIFT_ENTRY((i))) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
+//#define READ_ENTRY(i)               ( (entry_t)(( ((GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
+//#define WRITE_ENTRY(e,i)            ( *(GET_ENTRY_BLOCK_PTR((i))) = ( ((GET_ENTRY_BLOCK((i)))) & ( ~(ENTRY_MASK << 22) >> LSHIFT_ENTRY((i))) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
 
+#define IS_LITTLE_ENDIAN (*(unsigned char *)&(uint16_t){1})
+
+void SWAP(uint8_t* _a, uint8_t* _b) {
+    uint8_t tmp = *_a;
+    *_a = *_b;
+    *_b = tmp;
+}
+
+uint32_t* swap_endianness(uint32_t* x) {
+    SWAP((uint8_t*)(x)+0, (uint8_t*)(x)+3);
+    SWAP((uint8_t*)(x)+1, (uint8_t*)(x)+2);
+    return x;
+}
 
 
 // You'll read a LE number representation of the accurate BE number
 // Get the block, and swap it (to BE)
 // Then, the block will hold its accurate value
-
+entry_t READ_ENTRY(uint16_t i) {
+    entry_block_t eb = GET_ENTRY_BLOCK(i);
+#ifdef IS_LITTLE_ENDIAN
+    swap_endianness(&eb);
+#endif
+    return (entry_t)((eb >> RSHIFT_ENTRY(i)) & ENTRY_MASK);
+}
 
 // You'll have a block, get its value in BE, and modify it accordingly
 // Now you need to write this so that it's in BE in memory
 // So, swap the end result of the assign to LE, so that it writes it ultimately as desired (BE) on disk
+void WRITE_ENTRY(e, i) {
+    entry_block_t* ebp = GET_ENTRY_BLOCK_PTR(i);
+    entry_block_t eb = GET_ENTRY_BLOCK(i);
+#ifdef IS_LITTLE_ENDIAN
+    swap_endianness(&eb);
+#endif
+    //printf("DBG: (%u) %u %u\n", i, (entry_block_t)((~(((uint32_t)(ENTRY_MASK << 22)) >> LSHIFT_ENTRY(i)))), (entry_block_t)(e << RSHIFT_ENTRY(i)));
+    * ebp = (eb & (~(((uint32_t)(ENTRY_MASK << 22)) >> LSHIFT_ENTRY(i)))) | (e << RSHIFT_ENTRY(i));
+#ifdef IS_LITTLE_ENDIAN
+    swap_endianness(ebp);
+#endif
+}
 
 
 // Entry ("isolated")
 #define INVALID_ENTRY               MAX_ENTRIES
 #define SET_ENTRY_VALID(e)          ( (e) |= (1 << 8) )
-#define SET_ENTRY_INVALID(e)        ( (e) &= (1 << 8) )
+#define SET_ENTRY_INVALID(e)        ( (e) &= (~(1 << 8)) )
 #define IS_ENTRY_VALID(e)           ( ((e) >> 8) & (0x1) )
 #define SET_ENTRY_VALUE(e,n)        ( (e) = ((e) & (~0xFF)) | (n) )
 #define GET_ENTRY_VALUE(e)          ( (uint8_t)(( (e) & (0x00FF) ) ))
@@ -65,7 +103,6 @@ inline uint8_t LSHIFT_ENTRY(i) { return (10 * (i)-(GET_REAL_START_BIT((i)))); }
 // Misc
 #define ADD_TO_QUEUE(q, l, e, i, b)  SET_ENTRY_VALID((e)); SET_ENTRY_VALUE((e), (b)); WRITE_ENTRY((e), (i)); SET_QUEUE_LENGTH((q), (l + 1));
 
-unsigned char data[MAX_MEMORY] = {0};
 enum { FALSE = 0, TRUE = 1};
 //extern void on_out_of_memory();
 //extern void on_illegal_operation();
@@ -78,10 +115,6 @@ void on_illegal_operation() {
     printf("BAD 2");
     exit(2);
 }
-
-typedef uint32_t queue_t;
-typedef uint16_t entry_t;
-typedef uint32_t entry_block_t;
 
 queue_t * create_queue() {
     for (uint16_t qid; qid < MAX_QUEUES; qid++) {
@@ -311,14 +344,14 @@ unsigned char dequeue_byte(queue_t * q) {
 int main(void) {
     uint8_t t = ~(1 << 3);
     queue_t * a = create_queue();
-    printf("a: %u\n", *a);
-    enqueue_byte(a, 5); // e is 768 at the end of this (after ADD_TO_QUEUE call)
-    enqueue_byte(a, 1); // this validly detects first thing as taken, but after writing next ones don't work
-    //enqueue_byte(a, 3); // this overwrote things? it just saw first eid as valid
-    /*
-    queue_t * b = create_queue();
-    enqueue_byte(b, 3);
+    //printf("a: %u\n", *a);
+    enqueue_byte(a, 5); 
+    enqueue_byte(a, 1);
+    enqueue_byte(a, 3);
+    //queue_t * b = create_queue();
+    //enqueue_byte(b, 3);
     
+    /*
     uint16_t a_len = GET_QUEUE_LENGTH(*a);
     uint16_t a_base = GET_QUEUE_BASE(*a);
     uint16_t b_len = GET_QUEUE_LENGTH(*b);
@@ -328,17 +361,17 @@ int main(void) {
     dequeue_byte(a);
     */
     
-    //enqueue_byte(a, 2);
+    enqueue_byte(a, 2); // this overwrote 3? did not
     //enqueue_byte(b, 4);
     printf("%d ", dequeue_byte(a));
     printf("%d\n", dequeue_byte(a));
-    printf("%d\n", dequeue_byte(a));
-    /*
+    printf("%d\n", dequeue_byte(a)); // this doesn't clear in valid places for 3, but rather adds 10 after? maybe the shift is off
     enqueue_byte(a, 5);
-    enqueue_byte(b, 6);
+    //enqueue_byte(b, 6);
     printf("%d ", dequeue_byte(a));
     printf("%d\n", dequeue_byte(a));
     destroy_queue(a);
+    /*
     printf("%d ", dequeue_byte(b));
     printf("%d ", dequeue_byte(b));
     printf("%d\n", dequeue_byte(b));
