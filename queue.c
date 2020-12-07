@@ -25,13 +25,14 @@
 #define GET_QUEUE(i)                ( (queue_t*)&data[(3 * (i)) + 1] )
 
 // Entry (Block)
-#define GET_ENTRY_BLOCK(i)          ( (entry_block_t *)&data[(10*((i)+1)/8) + MONITOR_SEG_LEN] )
-#define RSHIFT_ENTRY(i)             ( 6 - ((i) % 8) )
-#define LSHIFT_ENTRY(i)             ( (i) % 8 )
-#define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (*b) >> RSHIFT_ENTRY((i)) ) & 0x1FF ))
-#define WRITE_ENTRY_TO_BLOCK(b,e,i) ( ( (*b) & ( ~(0x1FF << 6) >> LSHIFT_ENTRY((i)) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
-#define READ_ENTRY(i)               ( (entry_t)(( (*(GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & 0x1FF ))
-#define WRITE_ENTRY(e,i)            ( ( (*(GET_ENTRY_BLOCK((i)))) & ( ~(0x1FF << 6) >> LSHIFT_ENTRY((i)) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
+#define ENTRY_MASK                  0x3FF
+#define GET_ENTRY_BLOCK(i)          ( (entry_block_t *)&data[(10*((i))/8) + MONITOR_SEG_LEN] )
+#define RSHIFT_ENTRY(i)             ( 32 * (((i) / 3) + 1) - 1 - (10*(i)+9) )
+#define LSHIFT_ENTRY(i)             ( ((i) % 3 == 0) ? 0 : (10 * ((i) % 3)) )
+#define READ_ENTRY_FROM_BLOCK(b,i)  ( (entry_t)(( (*b) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
+#define WRITE_ENTRY_TO_BLOCK(b,e,i) ( *((b)) = ( ( (*b) & ( ~(ENTRY_MASK << 16) ) ) | ( (e) << RSHIFT_ENTRY((i)) ) ) )
+#define READ_ENTRY(i)               ( (entry_t)(( (*(GET_ENTRY_BLOCK((i)))) >> RSHIFT_ENTRY((i)) ) & ENTRY_MASK ))
+#define WRITE_ENTRY(e,i)            ( *(GET_ENTRY_BLOCK((i))) = ( (*(GET_ENTRY_BLOCK((i)))) & ( ~(ENTRY_MASK << 16) >> LSHIFT_ENTRY((i))) ) | ( (e) << RSHIFT_ENTRY((i)) ) )
 
 // Entry ("isolated")
 #define INVALID_ENTRY               MAX_ENTRIES
@@ -45,7 +46,7 @@
 #define SET_ENTRY_QUEUE_BASE_OFF(e) ( (e) &= (~(1 << 9)) )
 
 // Misc
-#define ADD_TO_QUEUE(q, l, e, i, b)  SET_ENTRY_VALID(e); SET_ENTRY_VALUE(e, b); WRITE_ENTRY(e, i); SET_QUEUE_LENGTH(q, l + 1);
+#define ADD_TO_QUEUE(q, l, e, i, b)  SET_ENTRY_VALID((e)); SET_ENTRY_VALUE((e), (b)); WRITE_ENTRY((e), (i)); SET_QUEUE_LENGTH((q), (l + 1));
 
 unsigned char data[MAX_MEMORY] = {0};
 enum { FALSE = 0, TRUE = 1};
@@ -63,17 +64,19 @@ void on_illegal_operation() {
 
 typedef uint32_t queue_t;
 typedef uint16_t entry_t;
-typedef uint16_t entry_block_t;
+typedef uint32_t entry_block_t;
 
 queue_t * create_queue() {
     for (uint16_t qid; qid < MAX_QUEUES; qid++) {
         queue_t* q = GET_QUEUE(qid);
         if (!IS_QUEUE_VALID(*q)) {
             SET_QUEUE_VALID(*q);
+            NUM_ACTIVE_QUEUES += 1;
             // find the next available base to mark it for this queue
             uint8_t foundBase = FALSE;
             for (uint16_t eid = 0; eid < MAX_ENTRIES; eid++) {
-                if (!IS_ENTRY_VALID(READ_ENTRY(eid))) {
+                entry_t e = READ_ENTRY(eid); // don't do this once it works
+                if (!IS_ENTRY_VALID(e)) {
                     SET_QUEUE_BASE(*q, eid);
                     foundBase = TRUE;
                     // don't mark entry with queue base yet - the base may change on enqueue (if this turns busy by then)
@@ -114,6 +117,7 @@ void destroy_queue(queue_t * q) {
     SET_QUEUE_LENGTH(*q, 0);
     SET_QUEUE_INVALID(*q);
     q = NULL;
+    NUM_ACTIVE_QUEUES -= 1;
 }
 
 void enqueue_byte(queue_t * q, unsigned char b) {
@@ -130,45 +134,66 @@ void enqueue_byte(queue_t * q, unsigned char b) {
         entry_t e = READ_ENTRY(eid);
         if (!IS_ENTRY_VALID(e)) {
             uint16_t gap = eid - end;
-            
-            if (gap == 0) {
-                // base matches, add to eid (e)
-                // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
-                SET_ENTRY_QUEUE_BASE_ON(e);
-                ADD_TO_QUEUE(*q, len, e, eid, b);
-            }
-            else if(len == 0) {
-                // base differs, but empty - update it and add to eid (e)
-                // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
-                SET_QUEUE_BASE(*q, eid);
-                SET_ENTRY_QUEUE_BASE_ON(e);
-                ADD_TO_QUEUE(*q, len, e, eid, b);
+
+            // gap is made from the distance to the end
+            // if len == 0, then end = base, and so gap == 0 (an addition)
+            // HOWEVER if len != 0, end = base + len. IF base == len, then gap == 0 but nonzero number (ie addition immediately to right)
+            // len == 0 seems to be determining factor
+
+            if (len == 0) {
+                if (gap == 0) {
+                    // len = 0, gap = 0 -> this means that the base held by the empty queue matches
+                    // make entry here, no need to mark as base since already matches, add it
+                    SET_ENTRY_QUEUE_BASE_ON(e);
+                    ADD_TO_QUEUE(*q, len, e, eid, b);
+                }
+                else {
+                    // gap != 0, but len = 0 -> this means that the empty queue base is not accurate
+                    // we've found an appropriate place to insert in eid'th entry, need to update the base on query
+                    entry_t eb = READ_ENTRY(base);
+                    SET_ENTRY_QUEUE_BASE_OFF(eb);
+                    WRITE_ENTRY(eb, base);
+                    SET_ENTRY_QUEUE_BASE_ON(e);
+                    SET_QUEUE_BASE(*q, eid);
+                    ADD_TO_QUEUE(*q, len, e, eid, b);
+                }
             }
             else {
-                if (gap > 1) {
-                    // shift right is necessary
-                    uint8_t previousAdjustment = FALSE;
+                if (gap == 0) {
+                    // len != 0, but gap = 0 -> this means that we're at end = eid (we're at end) OR both are 0
+                    // and we can safely add here to eid
+                    // no need to update base flag/etc
+                    // TODO: this broke stuff? after this, the 0'th id was incorrectly reported as valid
+                    // eid other than 0 seems to cause issues
+                    ADD_TO_QUEUE(*q, len, e, eid, b);
+                }
+                else {
+                    // len != 0 and gap != 0 -> this means that we've found eid available, but at a gap that we must shift towards
+                    // however, don't move the entire queue - shift everything right from the end to the gap, and then insert at end
+                    // we may run into other queues' bases -> need to update those as well
                     for (uint16_t j = end + 1; j < eid; j++) {
                         entry_t ej = READ_ENTRY(j);
                         if (IS_ENTRY_QUEUE_BASE(ej)) {
-                            // find the queue that this entry is a front of, and update it to the right
+                            // find the queue that this entry is a base of, and update it to the right
                             for (uint64_t qid = 0; qid < NUM_ACTIVE_QUEUES; qid++) {
-                                queue_t * qt = GET_QUEUE(qid);
+                                queue_t* qt = GET_QUEUE(qid);
                                 if (GET_QUEUE_BASE(*qt) == j) {
                                     SET_QUEUE_BASE(*qt, j + 1);
                                     entry_t new_base = READ_ENTRY(j + 1);
                                     SET_ENTRY_QUEUE_BASE_ON(new_base);
+                                    WRITE_ENTRY(new_base, j + 1);
                                     SET_ENTRY_QUEUE_BASE_OFF(ej);
                                 }
                             }
                         }
+                        // Regardless of whether base of another queue or not, shift entry right by one
                         WRITE_ENTRY(ej, j + 1);
                     }
+                    // end is available now, add to it
+                    ADD_TO_QUEUE(*q, len, e, eid, b);
                 }
-                // have shifted if necessary; now end+1 is available - add to it
-                e = READ_ENTRY(end + 1);
-                ADD_TO_QUEUE(*q, len, e, end+1, b);
             }
+
             isDone = TRUE;
             break;
         }
@@ -182,41 +207,49 @@ void enqueue_byte(queue_t * q, unsigned char b) {
             if (!IS_ENTRY_VALID(e)) {
                 uint16_t gap = base - i;
 
-                if (gap != 0) {
-                    if (len == 0) {
-                        // update base to eid, add to eid (e)
-                        // base flag adjusted on dequeue and not set on creation - no need to turn "older" base off
-                        SET_QUEUE_BASE(*q, eid);
+                if (len == 0) {
+                    if (gap != 0) {
+                        // len = 0, gap = 0 starting from base accounted for on right lookup
+                        // len == 0, gap != 0 -> we're an empty list but found a different base
+                        // just start the base there, and update the queue (and older base)
+                        entry_t eb = READ_ENTRY(base);
+                        SET_ENTRY_QUEUE_BASE_OFF(eb);
+                        WRITE_ENTRY(eb, base);
                         SET_ENTRY_QUEUE_BASE_ON(e);
+                        SET_QUEUE_BASE(*q, eid);
                         ADD_TO_QUEUE(*q, len, e, eid, b);
                     }
-                    else {
-                        // shift works no matter what - for gap == 1 it just does one iter
+                }
+                else {
+                    if (gap != 0) {
+                        // len != 0, gap = 0 -> a non empty list finds a space on the last valid element?? this cannot happen.
+                        // len != 0, gap != 0 -> non empty list finds a space more than one space to the left of the base
+                        // need to move everything - base will at the end be moved left by len spaces -> update to new, unmark old, add at
+                        // base(older) + len
                         for (uint16_t j = eid; j < end; j++) {
                             entry_t ej = READ_ENTRY(j + 1);
                             if (IS_ENTRY_QUEUE_BASE(ej)) {
                                 // find the queue that the next entry is a front of, and update it to the left
+                                // adjust any bases that are necessary along the way
+                                // here we WILL run into q's own base - will work as is
                                 for (uint64_t qid = 0; qid < NUM_ACTIVE_QUEUES; qid++) {
-                                    queue_t * qt = GET_QUEUE(qid);
+                                    queue_t* qt = GET_QUEUE(qid);
                                     if (GET_QUEUE_BASE(*qt) == j) {
                                         SET_QUEUE_BASE(*qt, j);
                                         entry_t new_base = READ_ENTRY(j);
                                         SET_ENTRY_QUEUE_BASE_ON(new_base);
+                                        WRITE_ENTRY(new_base, j);
                                         SET_ENTRY_QUEUE_BASE_OFF(ej);
                                     }
                                 }
                             }
+                            // Regardless of whether or not we found the base of another queue or not, shift entry left by one
                             WRITE_ENTRY(ej, j);
                         }
-                        // update base to base - 1, add to end
-                        // entry base on flag is adjusted above on first iter
-                        SET_QUEUE_BASE(*q, len - 1);
-                        e = READ_ENTRY(end);
-                        ADD_TO_QUEUE(*q, len, e, eid, b);
+                        // base + len (ie end) is available now - add to it
+                        ADD_TO_QUEUE(*q, len, e, end, b);
                     }
                 }
-                // gap == 0 covered when looking to the right
-                // TODO: gap == 0 seems to be called when a queue without space is created - what to do? Set base to 0, try again?
 
                 isDone = TRUE;
                 break;
@@ -262,24 +295,35 @@ int main(void) {
     uint8_t t = ~(1 << 3);
     queue_t * a = create_queue();
     printf("a: %u\n", *a);
-    enqueue_byte(a, 0);
-    enqueue_byte(a, 4);
+    enqueue_byte(a, 5); // e is 768 at the end of this (after ADD_TO_QUEUE call)
+    enqueue_byte(a, 1); // this validly detects first thing as taken, but after writing next ones don't work
+    //enqueue_byte(a, 3); // this overwrote things? it just saw first eid as valid
     /*
     queue_t * b = create_queue();
     enqueue_byte(b, 3);
-    enqueue_byte(a, 2);
-    enqueue_byte(b, 4);
+    
+    uint16_t a_len = GET_QUEUE_LENGTH(*a);
+    uint16_t a_base = GET_QUEUE_BASE(*a);
+    uint16_t b_len = GET_QUEUE_LENGTH(*b);
+    uint16_t b_base = GET_QUEUE_BASE(*b);
+    dequeue_byte(a); // here it's dequeuing b! doesn't distinguish between one queue and the other
+    dequeue_byte(b);
+    dequeue_byte(a);
     */
+    
+    //enqueue_byte(a, 2);
+    //enqueue_byte(b, 4);
     printf("%d ", dequeue_byte(a));
+    printf("%d\n", dequeue_byte(a));
     printf("%d\n", dequeue_byte(a));
     /*
     enqueue_byte(a, 5);
     enqueue_byte(b, 6);
-    printf("%d", dequeue_byte(a));
+    printf("%d ", dequeue_byte(a));
     printf("%d\n", dequeue_byte(a));
     destroy_queue(a);
-    printf("%d", dequeue_byte(b));
-    printf("%d", dequeue_byte(b));
+    printf("%d ", dequeue_byte(b));
+    printf("%d ", dequeue_byte(b));
     printf("%d\n", dequeue_byte(b));
     destroy_queue(b);
     */
