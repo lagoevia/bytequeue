@@ -244,9 +244,18 @@ unsigned char dequeue_byte(queue_t * q) {
 */
 
 int main(void) {
-    uint8_t t = ~(1 << 3);
-    queue_t * a = create_queue();
+    queue_t* a = create_queue();
+    queue_t* b = create_queue();
+    queue_t* c = create_queue();
+    destroy_queue(b);
+    queue_t* d = create_queue();
+
+    enqueue_byte(a, 15);
+    enqueue_byte(a, 14);
+    //enqueue_byte(b, 1)
+
     //printf("a: %u\n", *a);
+    /*
     enqueue_byte(a, 5); 
     enqueue_byte(a, 1);
     enqueue_byte(a, 3);
@@ -261,7 +270,6 @@ int main(void) {
     dequeue_byte(a); // here it's dequeuing b! doesn't distinguish between one queue and the other
     dequeue_byte(b);
     dequeue_byte(a);
-    */
     
     enqueue_byte(a, 2); // this overwrote 3? did not
     //enqueue_byte(b, 4);
@@ -273,7 +281,6 @@ int main(void) {
     printf("%d ", dequeue_byte(a));
     printf("%d\n", dequeue_byte(a));
     destroy_queue(a);
-    /*
     printf("%d ", dequeue_byte(b));
     printf("%d ", dequeue_byte(b));
     printf("%d\n", dequeue_byte(b));

@@ -42,6 +42,7 @@
 */
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // TODO: possible refactoring: on/off variants as "flags" with parameter?
 
@@ -71,7 +72,7 @@ typedef uint32_t entry_block_t;
 typedef uint16_t entry_t;
 
 #ifndef MAX_QUEUE_MEMORY
-	#define MAX_QUEUE_MEMORY				(2048)
+	#define MAX_QUEUE_MEMORY			(2048)
 #endif
 #define MAX_ACTIVE_QUEUES				(64)
 #define NUM_ACTIVE_QUEUES				(data[0])
@@ -120,7 +121,7 @@ inline uint8_t is_queue_valid(const queue_t* const q) {
 	return (*q & 0x1);
 }
 
-inline queue_t* get_queue(const uint16_t qid) {
+inline queue_t* get_queue_ptr(const uint16_t qid) {
 	// TODO: No shift of queue? Also, no memory issues with endianness?
 	return (queue_t*)&data[QUEUE_BYTE_SIZE * qid + 1];
 }
@@ -215,20 +216,271 @@ inline void set_entry_queue_base_off(entry_t e) {
 }
 
 
-// Actual API
+// --- Actual API
 extern void on_out_of_memory();
 extern void on_illegal_operation();
 
 queue_t* create_queue() {
-	return NULL;
+	for (uint16_t qid = 0; qid < MAX_ACTIVE_QUEUES; qid++) {
+		queue_t* q = get_queue_ptr(qid);
+		if (q && !is_queue_valid(q)) {
+			set_queue_valid(q);
+			NUM_ACTIVE_QUEUES += 1;
+			for (uint16_t base = 0; base < MAX_ENTRIES; base++) {
+				entry_t e = read_entry_from_id(base);
+				if (!is_entry_valid(e)) {
+					// TODO: should the space on creation be reserved?
+					// For simplicity now, assume yes
+					set_entry_valid(e);
+					set_entry_queue_base_on(e);
+					write_entry_to_id(e, base);
+					set_queue_base(q, base);
+					return q;
+				}
+			}
+			// All space is taken, but the room for the queue itself was available
+			// Mark this queue's base as inactive entry, then handle finding it a base on enqueue
+			set_queue_base(q, INVALID_ENTRY);
+			return q;
+		}
+	}
+	// There were no queues available - illegal op
+	on_illegal_operation();
 }
 
 void destroy_queue(queue_t* q) {
-	;
+	// ensure queue is valid
+	if (!q || !is_queue_valid(q)) {
+		on_illegal_operation();
+	}
+	
+	// mark all elements in queue inactive, also mark first as non-head
+	uint16_t base = get_queue_base(q);
+	uint16_t len = get_queue_length(q);
+
+	for (uint16_t i = base; i < base + len; i++) {
+		entry_t e = read_entry_from_id(i);
+		if (i == base) {
+			set_entry_queue_base_off(e);
+		}
+		set_entry_invalid(e);
+		write_entry_to_id(e, i);
+	}
+
+	// mark queue length as 0, set queue base to invalid entry, mark queue invalid, set q to be NULL
+	set_queue_length(q, 0);
+	set_queue_base(q, INVALID_ENTRY);
+	set_queue_invalid(q);
+	q = NULL;
 }
+
+/*
+		Enqueue needs to account for 3 general cases:
+			1. base itself is open for insertion
+			2. found space 1 or more units away (to the right) from the last valid entry
+			3. found space 1 or more units away (to the left) from base
+
+		For #2, the starting point is equal to base + len -> the entry to the right of the last valid entry
+			gap = current point - starting point.
+			Current will never be smaller than starting, only potentially equal.
+		For #3, the starting point is equal to base - 1 -> the entry to the left of the first valid entry (the base, as it's accounted for in #1);
+			gap = starting point - current point (since current point will be <= starting point for left).
+			Starting will never be smaller than current, only potentially equal.
+
+		#1)
+			- check base. if available, just add the entry there (as the base matches).
+		#2)
+			- gap == 0, len == 0 -> 0 0 or curr == start. Since start is base + len, here it'd be base. However, we've already checked base in #1. Contradiction.
+			- gap == 0, len != 0 -> 0 0 or curr == start. Since start is base + len, this is the entry to the right of the last entry. We can add the entry here normally.
+			- gap != 0, len == 0 -> empty queue, but gap means curr > starting; since empty, this means the reported base needs to be relocated. Update old and new entries, and add.
+			- gap != 0, len != 0 -> non-empty queue, but gap is 1 or greater
+				-- gap == 1 -> the space right next to the first space to the right of the last valid space is available. This means only one shift is necessary.
+				-- gap > 1 -> the entry is at least more than one unit away from the first space to the right of the last valid space - shifting of queue data will be necessary.
+				However, also take into account other possible queues and maintain their respective bases. Shifting is addressed on #S2 below, for this and above.
+
+		#3)
+			- gap == 0, len == 0 -> 0 0 or curr == start. Since start is base-1, this would mean that the space immediately to the left of base is available. Since empty, only need to relocate
+			and update bases.
+			- gap == 0, len != 0 -> 0 0 or curr == start. Since start is base-1, this would mean that the space immediately to the left of the base is available. However, it's nonempty, so a left
+			shift will be necessary (only once). Then add to (old) base + len.
+			- gap != 0, len == 0 -> empty queue, but gap means curr < start, so need to relocate and update bases.
+			- gap != 0, len != 0 -> non-empty queue, but gap is 1 or greater
+				-- gap == 1 -> space is exactly one to the left of the first space to the left of the first valid space is available. Two shifts necessary. #S3.
+				-- gap > 1 -> space is two or more units to the left of the first space to the left of the first valid space is available. More than two shifts necessary. #S3.
+
+		#S2:
+			only one circumstance when this happens, as marked above. Move here is from left to right, j on range (start, curr] incrementing by one.
+			check if j is base of any queue q
+				if yes, then update queue itself base to move over by one. toggle base flag off.
+				TODO: could avoid checking already verified queues?
+			entry[j] = entry[j-1]
+			outside of loop, go through all queues and set entries to bases manually, only if their bases were modified (ie ON or AFTER start+len).
+
+		#S3:
+			different circumstances can lead to a left shift. Regardless of the amount, the addition is always at the (old) rightmost valid entry. The reason behind this comes from
+			how the gaps are found - as soon as one is met, it's done. There's no trying to find blocks/etc. So, many of the shifts can be treated in the same way.
+			Move here is from right to left, j on range [curr, base+len), incrementing by one.
+			check if j+1 is base of any queue q
+				if yes, update queue itself base to move over by one. toggle base flag off.
+				TODO: could avoid checking already verified queues?
+			entry[j] = entry[j+1]
+			outside of loop, go through all queues and set entries to bases manually, only if their bases were modified (ie ON or BEFORE base).
+*/
+
 void enqueue_byte(queue_t* q, byte b) {
-	;
+	// ensure queue is valid
+	if (!q || !is_queue_valid(q)) {
+		on_illegal_operation();
+	}
+
+	uint16_t base = get_queue_base(q);
+	uint16_t len = get_queue_length(q);
+	bool isDone = false;
+
+	// try the base itself
+	entry_t e = read_entry_from_id(base);
+	if (!is_entry_valid(e)) {
+		// base is available
+		set_entry_valid(e);
+		set_entry_queue_base_on(e);
+		set_entry_value(e, b);
+		write_entry_to_id(e, base);
+		set_queue_length(q, len + 1);
+		isDone = true;
+	}
+
+	if (!isDone)
+	{
+		// try right
+		uint16_t start = base + len;
+		for (uint16_t i = start; i < MAX_ENTRIES; i++) {
+			if (!is_entry_valid(read_entry_from_id(i))) {
+				uint16_t gap = i - start;
+				if (gap == 0) {
+					// can add here normally (i)
+					e = read_entry_from_id(i);
+					set_entry_valid(e);
+					set_entry_value(e, b);
+					write_entry_to_id(e, i);
+					set_queue_length(q, len + 1);
+				}
+				else if (len == 0) {
+					// empty queue with gap - relocate and update entries
+					entry_t old = read_entry_from_id(base);
+					set_entry_queue_base_off(e);
+					write_entry_to_id(e, base);
+					e = read_entry_from_id(i);
+					set_entry_valid(e);
+					set_entry_queue_base_on(e);
+					set_entry_value(e, b);
+					write_entry_to_id(e, i);
+					set_queue_length(q, len + 1);
+					set_queue_base(q, i);
+				}
+				else
+				{
+					// nonempty queue with gap - shifting necessary
+					for (uint16_t j = i; j > start; j--) {
+						// j - 1's base will be equal to j's base
+						// j - 1's value will be equal to j's value
+						// so, copy the whole thing over
+						e = read_entry_from_id(j - 1);
+						write_entry_to_id(e, j);
+					}
+					// start is available now, but it still contains the "old" start contents - clear them (base) just in case
+					e = read_entry_from_id(start);
+					set_entry_queue_base_off(e);
+					set_entry_value(e, b);
+					write_entry_to_id(e, start);
+					set_queue_length(q, len + 1);
+				}
+				isDone = true;
+			}
+		}
+	}
+
+	// try left
+	if (!isDone) {
+		if (base != 0) {
+			uint16_t start = base - 1;
+			for (int i = start; i >= 0; i--) {
+				if (!is_entry_valid(read_entry_from_id(i))) {
+					uint16_t gap = start - i;
+					if (gap == 0)
+					{
+						if (len == 0) {
+							// empty queue, just need to adjust base/updae entries and insert at i
+							entry_t old = read_entry_from_id(base);
+							set_entry_queue_base_off(old);
+							write_entry_to_id(e, base);
+							e = read_entry_from_id(i);
+							set_entry_valid(e);
+							set_entry_queue_base_on(e);
+							set_entry_value(e, b);
+							write_entry_to_id(e, i);
+							set_queue_base(q, i);
+							set_queue_length(q, len + 1);
+						}
+						else {
+							// non-empty queue found a spot immediately to the left of its current base
+							// shift everything by one, update current queue base, and insert at the former "tail"
+							for (int j = i; j < base + len - 1; j++) {
+								// j + 1's info is now on j - copy it over
+								e = read_entry_from_id(j + 1);
+								write_entry_to_id(e, j);
+							}
+							// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
+							e = read_entry_from_id(base + len - 1);
+							set_entry_value(e, b);
+							write_entry_to_id(e, base + len - 1);
+							set_queue_base(q, i);
+							set_queue_length(q, len + 1);
+						}
+					}
+					else if (len == 0) {
+						// empty queue, need to adjust base/update entries and insert at i (just happens to be more than one gap away)
+						// same as gap == 0 and len == 0 case - TODO: maybe refactor this if chain?
+						entry_t old = read_entry_from_id(base);
+						set_entry_queue_base_off(old);
+						write_entry_to_id(e, base);
+						e = read_entry_from_id(i);
+						set_entry_valid(e);
+						set_entry_queue_base_on(e);
+						set_entry_value(e, b);
+						write_entry_to_id(e, i);
+						set_queue_base(q, i);
+						set_queue_length(q, len + 1);
+					}
+					else {
+						// non empty queue, but gap has some other queue(s)' info in the middle
+						// this is the same as gap == 0 len != 0, just so happens that the initial shift is moving other queues' data as well
+						// TODO: refactor this also, only really a need for two if statements on left search
+						for (int j = i; j < base + len - 1; j++) {
+							// j + 1's info is now on j - copy it over
+							e = read_entry_from_id(j + 1);
+							write_entry_to_id(e, j);
+						}
+						// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
+						e = read_entry_from_id(base + len - 1);
+						set_entry_value(e, b);
+						write_entry_to_id(e, base + len - 1);
+						set_queue_base(q, i);
+						set_queue_length(q, len + 1);
+					}
+
+					isDone = true;
+				}
+			}
+		}
+		
+	}
+	
+	if (!isDone) {
+		// we've tried everything and didn't succeed, so no memory left
+		on_out_of_memory();
+	}
 }
+
 byte dequeue_byte(queue_t* q) {
 	return 0;
 }
