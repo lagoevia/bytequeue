@@ -81,6 +81,7 @@ typedef uint16_t entry_t;
 #define ENTRY_SEG_LEN					(MAX_QUEUE_MEMORY - MONITOR_SEG_LEN)
 #define ENTRY_BIT_SIZE					(10)
 #define MAX_ENTRIES						(ENTRY_SEG_LEN * 8 / ENTRY_BIT_SIZE)
+#define ENTRY_BLOCK_BIT_SIZE			(32)
 
 byte data[MAX_QUEUE_MEMORY] = { 0 };
 
@@ -129,13 +130,35 @@ inline queue_t* get_queue_ptr(const uint16_t qid) {
 // --- Entry <-> Block
 
 #define ENTRY_MASK						(0x3FF)
-#define ENTRY_REAL_START_BIT(eid)		(ENTRY_BIT_SIZE * (eid))
-#define ENTRY_REAL_END_BIT(eid)			(ENTRY_REAL_START_BIT(eid) + ENTRY_BIT_SIZE - 1)
-#define ENTRY_BYTE_START_BIT(eid)		(8 * (ENTRY_REAL_START_BIT(eid) / 8))
-#define ENTRY_BYTE_END_BIT(eid)			(ENTRY_BYTE_START_BIT(eid+1) - 1)
+#define ENTRY_REAL_END_BIT(eid)			(ENTRY_BIT_SIZE * ((eid) + 1) - 1)
+#define ENTRY_REAL_START_BIT(eid)		(ENTRY_REAL_END_BIT(eid) - ENTRY_BIT_SIZE + (((eid) == 0) ? 1 : 0))
+#define ENTRY_BYTE_END_BIT(eid)			(8 * ((eid) + 1) - 1)
+#define ENTRY_BYTE_START_BIT(eid)		(ENTRY_BYTE_END_BIT(eid) - 8 + (((eid) == 0) ? 1 : 0))
+#define ENTRY_BLOCK_START_BIT(eid)		(ENTRY_BYTE_START_BIT(eid))
+#define ENTRY_BLOCK_END_BIT(eid)		(ENTRY_BLOCK_START_BIT(eid) + ENTRY_BLOCK_BIT_SIZE - (((eid) == 0) ? 1 : 0))
+
+bool debug_print_eblock_values(const uint16_t eid) {
+	uint16_t info[] = {
+		ENTRY_REAL_END_BIT(eid),
+		ENTRY_REAL_START_BIT(eid),
+		ENTRY_BYTE_END_BIT(eid),
+		ENTRY_BYTE_START_BIT(eid),
+		ENTRY_BLOCK_START_BIT(eid),
+		ENTRY_BLOCK_END_BIT(eid),
+		ENTRY_BLOCK_END_BIT(eid) - ENTRY_REAL_START_BIT(eid) - ENTRY_BIT_SIZE + ((eid == 0) ? 1 : 0)
+	};
+
+	printf("ENTRY_REAL_END_BIT\nENTRY_REAL_START_BIT\nENTRY_BYTE_END_BIT\nENTRY_BYTE_START_BIT\nENTRY_BLOCK_START_BIT\nENTRY_BLOCK_END_BIT\nSHIFT\n");
+	printf("Debug info for entry %u below:\n", eid);
+	for (int i = 0; i < 7; i++) {
+		printf("%u ", info[i]);
+	}
+	puts("");
+	return true;
+}
 
 inline entry_block_t* get_entry_block_ptr(const uint16_t eid) {
-	entry_block_t* block = (entry_block_t*)&data[MONITOR_SEG_LEN + ENTRY_BYTE_START_BIT(eid)];
+	entry_block_t* block = (entry_block_t*)&data[MONITOR_SEG_LEN + (ENTRY_REAL_START_BIT(eid)/8)];
 #ifdef IS_LITTLE_ENDIAN
 	__swap_endianness(block);
 #endif
@@ -143,7 +166,7 @@ inline entry_block_t* get_entry_block_ptr(const uint16_t eid) {
 }
 
 inline entry_block_t get_entry_block(const uint16_t eid) {
-	entry_block_t block = *(entry_block_t*)&data[MONITOR_SEG_LEN + ENTRY_BYTE_START_BIT(eid)];
+	entry_block_t block = *(entry_block_t*)&data[MONITOR_SEG_LEN + (ENTRY_REAL_START_BIT(eid)/8)];
 #ifdef IS_LITTLE_ENDIAN
 	__swap_endianness(&block);
 #endif
@@ -152,14 +175,14 @@ inline entry_block_t get_entry_block(const uint16_t eid) {
 
 inline entry_t read_entry_from_block(const entry_block_t block, const uint16_t eid) {
 	// Block is "coming in well", so no need to adjust it
-	uint16_t start_shift = ENTRY_REAL_END_BIT(eid) - ENTRY_BYTE_END_BIT(eid);
-	return (entry_t)((block >> start_shift) & ENTRY_MASK);
+	uint16_t shift = ENTRY_BLOCK_END_BIT(eid) - ENTRY_REAL_START_BIT(eid) - ENTRY_BIT_SIZE + ((eid == 0) ? 1 : 0);
+	return (entry_t)((block >> shift) & ENTRY_MASK);
 }
 
 inline void write_entry_to_block(entry_block_t* block, const entry_t entry, const uint16_t eid) {
 	// Block is "coming in well", but after the assignment it must be adjusted for memory representation
-	uint16_t start_shift = ENTRY_REAL_END_BIT(eid) - ENTRY_BYTE_END_BIT(eid);
-	*block = (*block & ~(ENTRY_MASK << start_shift)) | (entry >> start_shift);
+	uint16_t shift = ENTRY_BLOCK_END_BIT(eid) - ENTRY_REAL_START_BIT(eid) - ENTRY_BIT_SIZE + ((eid == 0) ? 1 : 0);
+	*block = (*block & ~(ENTRY_MASK << shift)) | ((entry_block_t)entry << shift);
 #ifdef IS_LITTLE_ENDIAN
 	__swap_endianness(block);
 #endif
@@ -183,12 +206,12 @@ inline void write_entry_to_id(const entry_t entry, const uint16_t eid) {
 #define ENTRY_BASE_BIT_SIZE				(1)
 #define ENTRY_BASE_SHIFT_ADJUSTMENT		(ENTRY_VALID_BIT_SIZE + ENTRY_VALUE_BIT_SIZE)
 
-inline void set_entry_valid(entry_t e) {
-	e |= (1 << ENTRY_VALID_SHIFT_ADJUSTMENT);
+inline void set_entry_valid(entry_t *e) {
+	*e |= (1 << ENTRY_VALID_SHIFT_ADJUSTMENT);
 }
 
-inline void set_entry_invalid(entry_t e) {
-	e &= (~(1 << ENTRY_VALID_SHIFT_ADJUSTMENT));
+inline void set_entry_invalid(entry_t *e) {
+	*e &= (~(1 << ENTRY_VALID_SHIFT_ADJUSTMENT));
 }
 
 inline uint8_t is_entry_valid(const entry_t e) {
@@ -199,20 +222,20 @@ inline byte get_entry_value(const entry_t e) {
 	return (e & ENTRY_VALUE_MASK);
 }
 
-inline void set_entry_value(entry_t e, byte v) {
-	e = (e & (~ENTRY_VALUE_MASK)) | v;
+inline void set_entry_value(entry_t *e, byte v) {
+	*e = ((*e) & (~ENTRY_VALUE_MASK)) | v;
 }
 
 inline uint8_t is_entry_queue_base(const entry_t e) {
 	return ((e >> ENTRY_BASE_SHIFT_ADJUSTMENT) & 0x1);
 }
 
-inline void set_entry_queue_base_on(entry_t e) {
-	e |= 1 << ENTRY_BASE_SHIFT_ADJUSTMENT;
+inline void set_entry_queue_base_on(entry_t *e) {
+	*e |= 1 << ENTRY_BASE_SHIFT_ADJUSTMENT;
 }
 
-inline void set_entry_queue_base_off(entry_t e) {
-	e &= (~(1 << ENTRY_BASE_SHIFT_ADJUSTMENT));
+inline void set_entry_queue_base_off(entry_t *e) {
+	*e &= (~(1 << ENTRY_BASE_SHIFT_ADJUSTMENT));
 }
 
 
@@ -229,10 +252,7 @@ queue_t* create_queue() {
 			for (uint16_t base = 0; base < MAX_ENTRIES; base++) {
 				entry_t e = read_entry_from_id(base);
 				if (!is_entry_valid(e)) {
-					// TODO: should the space on creation be reserved?
-					// For simplicity now, assume yes
-					set_entry_valid(e);
-					set_entry_queue_base_on(e);
+					set_entry_queue_base_on(&e);
 					write_entry_to_id(e, base);
 					set_queue_base(q, base);
 					return q;
@@ -261,9 +281,9 @@ void destroy_queue(queue_t* q) {
 	for (uint16_t i = base; i < base + len; i++) {
 		entry_t e = read_entry_from_id(i);
 		if (i == base) {
-			set_entry_queue_base_off(e);
+			set_entry_queue_base_off(&e);
 		}
-		set_entry_invalid(e);
+		set_entry_invalid(&e);
 		write_entry_to_id(e, i);
 	}
 
@@ -341,9 +361,8 @@ void enqueue_byte(queue_t* q, byte b) {
 	entry_t e = read_entry_from_id(base);
 	if (!is_entry_valid(e)) {
 		// base is available
-		set_entry_valid(e);
-		set_entry_queue_base_on(e);
-		set_entry_value(e, b);
+		set_entry_valid(&e);
+		set_entry_value(&e, b);
 		write_entry_to_id(e, base);
 		set_queue_length(q, len + 1);
 		isDone = true;
@@ -354,25 +373,26 @@ void enqueue_byte(queue_t* q, byte b) {
 		// try right
 		uint16_t start = base + len;
 		for (uint16_t i = start; i < MAX_ENTRIES; i++) {
+			entry_t t = read_entry_from_id(i);
 			if (!is_entry_valid(read_entry_from_id(i))) {
 				uint16_t gap = i - start;
 				if (gap == 0) {
 					// can add here normally (i)
 					e = read_entry_from_id(i);
-					set_entry_valid(e);
-					set_entry_value(e, b);
+					set_entry_valid(&e);
+					set_entry_value(&e, b);
 					write_entry_to_id(e, i);
 					set_queue_length(q, len + 1);
 				}
 				else if (len == 0) {
 					// empty queue with gap - relocate and update entries
 					entry_t old = read_entry_from_id(base);
-					set_entry_queue_base_off(e);
+					set_entry_queue_base_off(&e);
 					write_entry_to_id(e, base);
 					e = read_entry_from_id(i);
-					set_entry_valid(e);
-					set_entry_queue_base_on(e);
-					set_entry_value(e, b);
+					set_entry_valid(&e);
+					set_entry_queue_base_on(&e);
+					set_entry_value(&e, b);
 					write_entry_to_id(e, i);
 					set_queue_length(q, len + 1);
 					set_queue_base(q, i);
@@ -389,12 +409,13 @@ void enqueue_byte(queue_t* q, byte b) {
 					}
 					// start is available now, but it still contains the "old" start contents - clear them (base) just in case
 					e = read_entry_from_id(start);
-					set_entry_queue_base_off(e);
-					set_entry_value(e, b);
+					set_entry_queue_base_off(&e);
+					set_entry_value(&e, b);
 					write_entry_to_id(e, start);
 					set_queue_length(q, len + 1);
 				}
 				isDone = true;
+				break;
 			}
 		}
 	}
@@ -411,12 +432,12 @@ void enqueue_byte(queue_t* q, byte b) {
 						if (len == 0) {
 							// empty queue, just need to adjust base/updae entries and insert at i
 							entry_t old = read_entry_from_id(base);
-							set_entry_queue_base_off(old);
-							write_entry_to_id(e, base);
+							set_entry_queue_base_off(&old);
+							write_entry_to_id(old, base);
 							e = read_entry_from_id(i);
-							set_entry_valid(e);
-							set_entry_queue_base_on(e);
-							set_entry_value(e, b);
+							set_entry_valid(&e);
+							set_entry_queue_base_on(&e);
+							set_entry_value(&e, b);
 							write_entry_to_id(e, i);
 							set_queue_base(q, i);
 							set_queue_length(q, len + 1);
@@ -431,7 +452,7 @@ void enqueue_byte(queue_t* q, byte b) {
 							}
 							// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
 							e = read_entry_from_id(base + len - 1);
-							set_entry_value(e, b);
+							set_entry_value(&e, b);
 							write_entry_to_id(e, base + len - 1);
 							set_queue_base(q, i);
 							set_queue_length(q, len + 1);
@@ -441,12 +462,12 @@ void enqueue_byte(queue_t* q, byte b) {
 						// empty queue, need to adjust base/update entries and insert at i (just happens to be more than one gap away)
 						// same as gap == 0 and len == 0 case - TODO: maybe refactor this if chain?
 						entry_t old = read_entry_from_id(base);
-						set_entry_queue_base_off(old);
-						write_entry_to_id(e, base);
+						set_entry_queue_base_off(&old);
+						write_entry_to_id(old, base);
 						e = read_entry_from_id(i);
-						set_entry_valid(e);
-						set_entry_queue_base_on(e);
-						set_entry_value(e, b);
+						set_entry_valid(&e);
+						set_entry_queue_base_on(&e);
+						set_entry_value(&e, b);
 						write_entry_to_id(e, i);
 						set_queue_base(q, i);
 						set_queue_length(q, len + 1);
@@ -462,13 +483,14 @@ void enqueue_byte(queue_t* q, byte b) {
 						}
 						// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
 						e = read_entry_from_id(base + len - 1);
-						set_entry_value(e, b);
+						set_entry_value(&e, b);
 						write_entry_to_id(e, base + len - 1);
 						set_queue_base(q, i);
 						set_queue_length(q, len + 1);
 					}
 
 					isDone = true;
+					break;
 				}
 			}
 		}

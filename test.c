@@ -245,13 +245,18 @@ unsigned char dequeue_byte(queue_t * q) {
 
 int main(void) {
     queue_t* a = create_queue();
+    /*
     queue_t* b = create_queue();
     queue_t* c = create_queue();
     destroy_queue(b);
     queue_t* d = create_queue();
+    */
 
     enqueue_byte(a, 15);
     enqueue_byte(a, 14);
+    enqueue_byte(a, 13); // all above are done fine
+    enqueue_byte(a, 12); // this seems to write to the wrong block, and overwrites things
+    enqueue_byte(a, 65);
     //enqueue_byte(b, 1)
 
     //printf("a: %u\n", *a);
