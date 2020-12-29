@@ -1,51 +1,8 @@
 #ifndef QUEUE_H
 #define QUEUE_H
 
-/**
-	A queue consists of the following:
-	- length: leftmost 11 bits -> the number of current entries in this queue
-	- base: next 11 bits -> the entry id for the first entry (i.e front) of the queue
-	- padding bit (unused)
-	- valid: rightmost bit -> whether this queue is valid or not
-
-	A queue can thus be represented within 24bit (3B).
-	Queues will reside in a segment of memory called the MONITOR SEGMENT; the remaining
-	memory is called the ENTRY SEGMENT. An user interacts with queries via query handles:
-	these are just 4B pointers to the corresponding section of the MONITOR SEGMENT.
-
-	The MONITOR SEGMENT contains the following:
-	- number of active queues: first byte of the monitor segment -> the number of active queues
-	- the queues themselves: 3B each, following immediately after the number of active queues
-
-	An entry consists of the following:
-	- base: leftmost bit -> whether this entry is the base of a queue or not
-	- valid: next bit -> whether this entry is valid or not
-	- value: next 8bit -> the value this entry holds
-
-	An entry can thus be represented within 10bit.
-	Entries will reside in the ENTRY SEGMENT. 
-	
-	Unlike queues that "fit nicely" within byte bounds, entries need to be interleaved with each other.
-	The approach this code considers is one where entries are read from their "entry block", modified
-	separately, and then written back into that block. The bulk of this workaround is managed in the
-	entry block <-> entry interactions, with entry-specific operations working under the assumption
-	that the entry passed into them contains the elements all the way to the right, by themselves.
-
-	Entries themselves can be in different configurations, with the "widest" one being 1-8-1. In it,
-	the entry block needs to be 3B to hold the entire entry. Thus, an entry block should be 4B wide.
-	Blocks are read from memory under the assumption that they have been written as big endian (but
-	ultimately represented as little endian), so the get_entry_block* functions read the block from
-	memory, and swap their endianness if appropriate. Despite the blocks being in correct order, they
-	need to be swapped after a write takes place so that upon the next read the assumptions of big 
-	endian data represented as little endian hold.
-
-*/
-
 #include <stdint.h>
 #include <stdbool.h>
-
-// TODO: possible refactoring: on/off variants as "flags" with parameter?
-
 
 /*
 	The solution assumes that bytes in memory are laid out as they are assigned arithmetically:
@@ -137,7 +94,7 @@ inline queue_t* get_queue_ptr(const uint16_t qid) {
 #define ENTRY_BLOCK_START_BIT(eid)		(ENTRY_BYTE_START_BIT(eid))
 #define ENTRY_BLOCK_END_BIT(eid)		(ENTRY_BLOCK_START_BIT(eid) + ENTRY_BLOCK_BIT_SIZE - (((eid) == 0) ? 1 : 0))
 
-bool debug_print_eblock_values(const uint16_t eid) {
+void debug_print_eblock_values(const uint16_t eid) {
 	uint16_t info[] = {
 		ENTRY_REAL_END_BIT(eid),
 		ENTRY_REAL_START_BIT(eid),
@@ -154,7 +111,6 @@ bool debug_print_eblock_values(const uint16_t eid) {
 		printf("%u ", info[i]);
 	}
 	puts("");
-	return true;
 }
 
 inline entry_block_t* get_entry_block_ptr(const uint16_t eid) {
@@ -240,9 +196,24 @@ inline void set_entry_queue_base_off(entry_t *e) {
 
 
 // --- Actual API
+
+/**
+	User function called when a queue operation fails because of insufficient memory.
+	Note: This function should not return.
+*/
 extern void on_out_of_memory();
+/**
+	User function called when a queue operation fails because of an illegal request (popping an empty queue, etc).
+	Note: This function should not return.
+*/
 extern void on_illegal_operation();
 
+/**
+	Creates a queue and returns the handle to it.
+	Note: there is no guarantee that the queue actually has an entry available for it.
+	Fails if:
+		- all MAX_QUEUES are already taken
+*/
 queue_t* create_queue() {
 	for (uint16_t qid = 0; qid < MAX_ACTIVE_QUEUES; qid++) {
 		queue_t* q = get_queue_ptr(qid);
@@ -268,6 +239,13 @@ queue_t* create_queue() {
 	on_illegal_operation();
 }
 
+/**
+	Destroys a queue and marks all of its entries as invalid.
+	Note: deletion here means invalidating the queue, and setting it length to 0 and its base to INVALID_ENTRY.
+	Fails if:
+		- q is NULL
+		- the queue handle pointed at by q is not for a valid queue
+*/
 void destroy_queue(queue_t* q) {
 	// ensure queue is valid
 	if (!q || !is_queue_valid(q)) {
@@ -294,59 +272,14 @@ void destroy_queue(queue_t* q) {
 	q = NULL;
 }
 
-/*
-		Enqueue needs to account for 3 general cases:
-			1. base itself is open for insertion
-			2. found space 1 or more units away (to the right) from the last valid entry
-			3. found space 1 or more units away (to the left) from base
-
-		For #2, the starting point is equal to base + len -> the entry to the right of the last valid entry
-			gap = current point - starting point.
-			Current will never be smaller than starting, only potentially equal.
-		For #3, the starting point is equal to base - 1 -> the entry to the left of the first valid entry (the base, as it's accounted for in #1);
-			gap = starting point - current point (since current point will be <= starting point for left).
-			Starting will never be smaller than current, only potentially equal.
-
-		#1)
-			- check base. if available, just add the entry there (as the base matches).
-		#2)
-			- gap == 0, len == 0 -> 0 0 or curr == start. Since start is base + len, here it'd be base. However, we've already checked base in #1. Contradiction.
-			- gap == 0, len != 0 -> 0 0 or curr == start. Since start is base + len, this is the entry to the right of the last entry. We can add the entry here normally.
-			- gap != 0, len == 0 -> empty queue, but gap means curr > starting; since empty, this means the reported base needs to be relocated. Update old and new entries, and add.
-			- gap != 0, len != 0 -> non-empty queue, but gap is 1 or greater
-				-- gap == 1 -> the space right next to the first space to the right of the last valid space is available. This means only one shift is necessary.
-				-- gap > 1 -> the entry is at least more than one unit away from the first space to the right of the last valid space - shifting of queue data will be necessary.
-				However, also take into account other possible queues and maintain their respective bases. Shifting is addressed on #S2 below, for this and above.
-
-		#3)
-			- gap == 0, len == 0 -> 0 0 or curr == start. Since start is base-1, this would mean that the space immediately to the left of base is available. Since empty, only need to relocate
-			and update bases.
-			- gap == 0, len != 0 -> 0 0 or curr == start. Since start is base-1, this would mean that the space immediately to the left of the base is available. However, it's nonempty, so a left
-			shift will be necessary (only once). Then add to (old) base + len.
-			- gap != 0, len == 0 -> empty queue, but gap means curr < start, so need to relocate and update bases.
-			- gap != 0, len != 0 -> non-empty queue, but gap is 1 or greater
-				-- gap == 1 -> space is exactly one to the left of the first space to the left of the first valid space is available. Two shifts necessary. #S3.
-				-- gap > 1 -> space is two or more units to the left of the first space to the left of the first valid space is available. More than two shifts necessary. #S3.
-
-		#S2:
-			only one circumstance when this happens, as marked above. Move here is from left to right, j on range (start, curr] incrementing by one.
-			check if j is base of any queue q
-				if yes, then update queue itself base to move over by one. toggle base flag off.
-				TODO: could avoid checking already verified queues?
-			entry[j] = entry[j-1]
-			outside of loop, go through all queues and set entries to bases manually, only if their bases were modified (ie ON or AFTER start+len).
-
-		#S3:
-			different circumstances can lead to a left shift. Regardless of the amount, the addition is always at the (old) rightmost valid entry. The reason behind this comes from
-			how the gaps are found - as soon as one is met, it's done. There's no trying to find blocks/etc. So, many of the shifts can be treated in the same way.
-			Move here is from right to left, j on range [curr, base+len), incrementing by one.
-			check if j+1 is base of any queue q
-				if yes, update queue itself base to move over by one. toggle base flag off.
-				TODO: could avoid checking already verified queues?
-			entry[j] = entry[j+1]
-			outside of loop, go through all queues and set entries to bases manually, only if their bases were modified (ie ON or BEFORE base).
+/**
+	Enqueues (adds) a byte into a specific queue.
+	Note: (internal) shifting may be necessary under some conditions; bases may be assigned to queues here.
+	Fails if:
+		- q is NULL
+		- the queue handle pointed at by q is not for a valid queue
+		- looked at base, then right, then left, and still didn't insert: out of memory
 */
-
 void enqueue_byte(queue_t* q, byte b) {
 	// ensure queue is valid
 	if (!q || !is_queue_valid(q)) {
@@ -482,54 +415,11 @@ void enqueue_byte(queue_t* q, byte b) {
 						set_queue_base(q, i);
 						set_queue_length(q, len + 1);
 					}
-
-					/*
-					if (gap == 0)
-					{
-						if (len == 0) {
-							
-						}
-						else {
-							
-						}
-					}
-					else if (len == 0) {
-						
-						// same as gap == 0 and len == 0 case - TODO: maybe refactor this if chain?
-						entry_t old = read_entry_from_id(base);
-						set_entry_queue_base_off(&old);
-						write_entry_to_id(old, base);
-						e = read_entry_from_id(i);
-						set_entry_valid(&e);
-						set_entry_queue_base_on(&e);
-						set_entry_value(&e, b);
-						write_entry_to_id(e, i);
-						set_queue_base(q, i);
-						set_queue_length(q, len + 1);
-					}
-					else {
-						
-						// TODO: refactor this also, only really a need for two if statements on left search
-						for (int j = i; j < base + len - 1; j++) {
-							// j + 1's info is now on j - copy it over
-							e = read_entry_from_id(j + 1);
-							write_entry_to_id(e, j);
-						}
-						// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
-						e = read_entry_from_id(base + len - 1);
-						set_entry_value(&e, b);
-						write_entry_to_id(e, base + len - 1);
-						set_queue_base(q, i);
-						set_queue_length(q, len + 1);
-					}
-					*/
-
 					isDone = true;
 					break;
 				}
 			}
 		}
-		
 	}
 	
 	if (!isDone) {
@@ -538,6 +428,13 @@ void enqueue_byte(queue_t* q, byte b) {
 	}
 }
 
+/**
+	Dequeues (removes) a byte from a specific queue.
+	Note: this operation is really just updating the base entry and the queue handle.
+	Fails if:
+		- q is NULL
+		- the queue handle pointed at by q is not for a valid queue
+*/
 byte dequeue_byte(queue_t* q) {
 	// ensure queue is valid
 	if (!q || !is_queue_valid(q)) {
