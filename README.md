@@ -1,5 +1,9 @@
 # Byte Queue
 
+## Instructions
+Use [CMake](https://cmake.org/) to build for your desired platform, and then just run the demo executable!
+Note: technically, the only relevant part is the header file `queue.h`; if you want to use this for your project, all you need to do is include that!
+
 ## Problem Summary
 Byte queue implementation for a programming challenge. Some of the info is below:
 - Code cannot call malloc/other heap management routines; data (other than in local funcs) must be allocated from `unsigned char data[2048]`.
