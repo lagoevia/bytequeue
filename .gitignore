@@ -1,0 +1,6 @@
+out/
+*.exe
+*.pdb
+*.ilk
+.vs/
+_build
