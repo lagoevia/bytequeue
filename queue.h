@@ -95,7 +95,7 @@ byte data[MAX_QUEUE_MEMORY] = { 0 };
 #define QUEUE_BASE_SHIFT_ADJUSTMENT		(QUEUE_BIT_SIZE - QUEUE_LENGTH_BIT_SIZE - QUEUE_BASE_BIT_SIZE)
 
 inline void set_queue_length(queue_t* q, const uint16_t len) {
-	*q = (*q & ~(QUEUE_MASK << QUEUE_LENGTH_BIT_SIZE)) | (len << QUEUE_LENGTH_SHIFT_ADJUSTMENT);
+	*q = (*q & ~(QUEUE_MASK << QUEUE_LENGTH_SHIFT_ADJUSTMENT)) | (len << QUEUE_LENGTH_SHIFT_ADJUSTMENT);
 }
 
 inline uint16_t get_queue_length(const queue_t* const q) {
@@ -103,7 +103,7 @@ inline uint16_t get_queue_length(const queue_t* const q) {
 }
 
 inline void set_queue_base(queue_t* q, const uint16_t base) {
-	*q = (*q & ~(QUEUE_MASK << QUEUE_BASE_BIT_SIZE)) | (base << QUEUE_BASE_SHIFT_ADJUSTMENT);
+	*q = (*q & ~(QUEUE_MASK << QUEUE_BASE_SHIFT_ADJUSTMENT)) | (base << QUEUE_BASE_SHIFT_ADJUSTMENT);
 }
 
 inline uint16_t get_queue_base(const queue_t* const q) {
@@ -251,7 +251,7 @@ queue_t* create_queue() {
 			NUM_ACTIVE_QUEUES += 1;
 			for (uint16_t base = 0; base < MAX_ENTRIES; base++) {
 				entry_t e = read_entry_from_id(base);
-				if (!is_entry_valid(e)) {
+				if (!is_entry_valid(e) && !is_entry_queue_base(e)) {
 					set_entry_queue_base_on(&e);
 					write_entry_to_id(e, base);
 					set_queue_base(q, base);
@@ -387,7 +387,7 @@ void enqueue_byte(queue_t* q, byte b) {
 				else if (len == 0) {
 					// empty queue with gap - relocate and update entries
 					entry_t old = read_entry_from_id(base);
-					set_entry_queue_base_off(&e);
+					set_entry_queue_base_off(&e); // this is a problem; old queue head may be head of another one now - prevent this
 					write_entry_to_id(e, base);
 					e = read_entry_from_id(i);
 					set_entry_valid(&e);
@@ -405,6 +405,16 @@ void enqueue_byte(queue_t* q, byte b) {
 						// j - 1's value will be equal to j's value
 						// so, copy the whole thing over
 						e = read_entry_from_id(j - 1);
+						if (is_entry_queue_base(e)) {
+							// if this was a head, update it's queue base
+							for (uint16_t qid = 0; qid < MAX_ACTIVE_QUEUES; qid++) {
+								queue_t* other = get_queue_ptr(qid);
+								if (get_queue_base(other) == (j - 1)) {
+									set_queue_base(other, j);
+									break;
+								}
+							}
+						}
 						write_entry_to_id(e, j);
 					}
 					// start is available now, but it still contains the "old" start contents - clear them (base) just in case
@@ -427,39 +437,64 @@ void enqueue_byte(queue_t* q, byte b) {
 			for (int i = start; i >= 0; i--) {
 				if (!is_entry_valid(read_entry_from_id(i))) {
 					uint16_t gap = start - i;
+					if (len == 0) {
+						// case shared between gap 0 len 0 and gap != 0 and len 0
+						// (gap == 0 and len == 0) empty queue, just need to adjust base/updae entries and insert at i
+						// (gap != 0 and len == 0) empty queue, need to adjust base/update entries and insert at i (just happens to be more than one gap away)
+						entry_t old = read_entry_from_id(base);
+						set_entry_queue_base_off(&old);
+						write_entry_to_id(old, base);
+						e = read_entry_from_id(i);
+						set_entry_valid(&e);
+						set_entry_queue_base_on(&e);
+						set_entry_value(&e, b);
+						write_entry_to_id(e, i);
+						set_queue_base(q, i);
+						set_queue_length(q, len + 1);
+					}
+					else {
+						// case shared between gap 0 len != 0 and gap != 0 and len != 0
+						// gap 0 len != 0:
+						// non-empty queue found a spot immediately to the left of its current base
+						// shift everything by one, update current queue base, and insert at the former "tail"
+						// gap != 0 len != 0:
+						// non empty queue, but gap has some other queue(s)' info in the middle
+						// this is the same as gap == 0 len != 0, just so happens that the initial shift is moving other queues' data as well
+						for (int j = i; j < base + len - 1; j++) {
+							// j + 1's info is now on j - copy it over
+							e = read_entry_from_id(j + 1);
+							if (is_entry_queue_base(e)) {
+								// if this was a head, update it's queue base
+								for (uint16_t qid = 0; qid < MAX_ACTIVE_QUEUES; qid++) {
+									queue_t* other = get_queue_ptr(qid);
+									if (get_queue_base(other) == (j + 1)) {
+										set_queue_base(other, j);
+										break;
+									}
+								}
+							}
+							write_entry_to_id(e, j);
+						}
+						// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
+						e = read_entry_from_id(base + len - 1);
+						set_entry_value(&e, b);
+						write_entry_to_id(e, base + len - 1);
+						set_queue_base(q, i);
+						set_queue_length(q, len + 1);
+					}
+
+					/*
 					if (gap == 0)
 					{
 						if (len == 0) {
-							// empty queue, just need to adjust base/updae entries and insert at i
-							entry_t old = read_entry_from_id(base);
-							set_entry_queue_base_off(&old);
-							write_entry_to_id(old, base);
-							e = read_entry_from_id(i);
-							set_entry_valid(&e);
-							set_entry_queue_base_on(&e);
-							set_entry_value(&e, b);
-							write_entry_to_id(e, i);
-							set_queue_base(q, i);
-							set_queue_length(q, len + 1);
+							
 						}
 						else {
-							// non-empty queue found a spot immediately to the left of its current base
-							// shift everything by one, update current queue base, and insert at the former "tail"
-							for (int j = i; j < base + len - 1; j++) {
-								// j + 1's info is now on j - copy it over
-								e = read_entry_from_id(j + 1);
-								write_entry_to_id(e, j);
-							}
-							// former tail's info is still on there, but no need to wipe as it is guaranteed not to be a head
-							e = read_entry_from_id(base + len - 1);
-							set_entry_value(&e, b);
-							write_entry_to_id(e, base + len - 1);
-							set_queue_base(q, i);
-							set_queue_length(q, len + 1);
+							
 						}
 					}
 					else if (len == 0) {
-						// empty queue, need to adjust base/update entries and insert at i (just happens to be more than one gap away)
+						
 						// same as gap == 0 and len == 0 case - TODO: maybe refactor this if chain?
 						entry_t old = read_entry_from_id(base);
 						set_entry_queue_base_off(&old);
@@ -473,8 +508,7 @@ void enqueue_byte(queue_t* q, byte b) {
 						set_queue_length(q, len + 1);
 					}
 					else {
-						// non empty queue, but gap has some other queue(s)' info in the middle
-						// this is the same as gap == 0 len != 0, just so happens that the initial shift is moving other queues' data as well
+						
 						// TODO: refactor this also, only really a need for two if statements on left search
 						for (int j = i; j < base + len - 1; j++) {
 							// j + 1's info is now on j - copy it over
@@ -488,6 +522,7 @@ void enqueue_byte(queue_t* q, byte b) {
 						set_queue_base(q, i);
 						set_queue_length(q, len + 1);
 					}
+					*/
 
 					isDone = true;
 					break;
@@ -504,7 +539,36 @@ void enqueue_byte(queue_t* q, byte b) {
 }
 
 byte dequeue_byte(queue_t* q) {
-	return 0;
+	// ensure queue is valid
+	if (!q || !is_queue_valid(q)) {
+		on_illegal_operation();
+	}
+
+	uint16_t base = get_queue_base(q);
+	uint16_t len = get_queue_length(q);
+
+	if (len == 0) // empty queue
+		on_illegal_operation();
+
+	entry_t e = read_entry_from_id(base);
+	uint8_t value = get_entry_value(e);
+	set_entry_invalid(&e);
+	set_entry_queue_base_off(&e);
+	write_entry_to_id(e, base);
+	if (len > 1) {
+		// if there's more entries that this queue owns to the right, adjust
+		set_queue_base(q, base + 1);
+		entry_t next = read_entry_from_id(base + 1);
+		set_entry_queue_base_off(&next);
+		write_entry_to_id(next, base + 1);
+	}
+	else {
+		// this was the sole entry of the queue
+		set_queue_base(q, INVALID_ENTRY);
+	}
+	
+	set_queue_length(q, len - 1);
+	return value;
 }
 
 #endif

@@ -245,15 +245,40 @@ unsigned char dequeue_byte(queue_t * q) {
 
 int main(void) {
     queue_t* a = create_queue();
-    /*
+    enqueue_byte(a, 0);
+    enqueue_byte(a, 1);
     queue_t* b = create_queue();
+    enqueue_byte(b, 3);
+    enqueue_byte(a, 2);
+    enqueue_byte(b, 4); // adds this to a?
+    printf("%d ", dequeue_byte(a));
+    printf("%d\n", dequeue_byte(a));
+    enqueue_byte(a, 5);
+    enqueue_byte(b, 6);
+    printf("%d ", dequeue_byte(a));
+    printf("%d\n", dequeue_byte(a));
+    destroy_queue(a);
+    printf("%d ", dequeue_byte(b));
+    printf("%d ", dequeue_byte(b));
+    printf("%d\n", dequeue_byte(b));
+    destroy_queue(b);
+    /*
     queue_t* c = create_queue();
     destroy_queue(b);
     queue_t* d = create_queue();
     */
 
+    /*
+    // TODO: test enqueue with multiple queues existing
     enqueue_byte(a, 15);
     enqueue_byte(a, 14);
+    enqueue_byte(b, 1); // works fine but queue length not updated, base not correct - maybe endianness issue? a's length and base are fine though; 
+    puts("done");
+    dequeue_byte(a);
+    dequeue_byte(b);
+    dequeue_byte(a);
+    */
+    /*
     enqueue_byte(a, 13); // all above are done fine
     enqueue_byte(a, 12); // this seems to write to the wrong block, and overwrites things
     enqueue_byte(a, 65);
