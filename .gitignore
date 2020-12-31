@@ -3,4 +3,4 @@ out/
 *.pdb
 *.ilk
 .vs/
-_build
+_build/

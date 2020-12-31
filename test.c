@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+
 #include "queue.h"
 
 void on_out_of_memory() {
