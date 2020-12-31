@@ -17,6 +17,9 @@ jobs:
       with:
           submodules: recursive
 
+    - name: setup-msbuild
+      uses: microsoft/setup-msbuild@v1
+
     - name: Running cmake (windows)
       run: |
         cd ${{ github.workspace }}
